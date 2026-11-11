@@ -1,62 +1,51 @@
 using System;
 using UnityEngine;
 
-// The first sung note sets the key. A short release separates repeated notes.
+// Each note has a fixed time slot. The first voiced pitch sets the singer's key.
 public sealed class SingingLock
 {
     public static readonly int[] Notes = {
         0,0,7,7,9,9,7, 5,5,4,4,2,2,0,
         7,7,5,5,4,4,2, 7,7,5,5,4,4,2,
         0,0,7,7,9,9,7, 5,5,4,4,2,2,0 };
+    public const float Beat = .4f;
+    public const float LeadIn = 4 * Beat;
     public int Count { get; private set; }
     public int Target { get; }
-    public string Guidance { get; private set; } = "Sing a comfortable starting note.";
-    public float TargetHz => Count == 0 ? 261.63f : 440f * Mathf.Pow(2, (tonic + Notes[Math.Min(Count, Target-1)]) / 12f);
-    public string TargetName {
-        get {
-            if (Count == 0) return "Any starting note";
-            int midi = Mathf.RoundToInt(69 + 12 * Mathf.Log(TargetHz / 440f, 2));
-            return Names[midi % 12] + (midi / 12 - 1);
-        }
+    public int Hits { get; private set; }
+    public int Required => Mathf.CeilToInt(Target * .70f);
+    public readonly bool[] Matched;
+    public float Progress { get; private set; }
+    public string Guidance { get; private set; }
+    float start, end, lastHeard = -1, credit, tonic;
+    bool keyed;
+    public SingingLock(bool full) {
+        Target = full ? Notes.Length : 7;
+        Matched = new bool[Target];
+        start = LeadIn; end = start + Beat;
+        Guidance = "Get ready";
     }
-    static readonly string[] Names = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
-    float tonic, held, candidate, release;
-    bool separated = true;
-    public SingingLock(bool full) { Target = full ? Notes.Length : 7; }
-
-    public void Hear(float hz, float seconds)
-    {
-        if (Count >= Target) return;
-        if (hz <= 0) {
-            held = 0; release += seconds;
-            if (release >= .06f) {
-                separated = true;
-                if (Guidance.StartsWith("Pause") || Guidance.StartsWith("On pitch"))
-                    Guidance = "Sing the highlighted note.";
-            }
-            return;
+    public void Advance(float time) {
+        while (Count < Target && time >= end) {
+            Count++; start = end; end += Beat * (Count % 7 == 6 ? 2 : 1);
+            credit = 0; Guidance = "Sing the highlighted note";
         }
-        release = 0;
-        float pitch = 12f * Mathf.Log(hz / 440f, 2);
-        if (Count == 0 && (held == 0 || Mathf.Abs(pitch - candidate) > .8f)) { candidate = pitch; held = 0; }
-        float relative = pitch - (Count == 0 ? candidate : tonic);
-        if (Count > 0 && Mathf.Abs(relative - Notes[Count-1]) > 1.4f) separated = true;
-        float difference = relative - Notes[Count];
-        if (Mathf.Abs(difference) > 1f) {
-            Guidance = difference < 0 ? "Too low  -  sing higher." : "Too high  -  sing lower.";
-            held = 0; return;
-        }
-        if (!separated && Count > 0 && Notes[Count] == Notes[Count-1]) {
-            Guidance = "Pause briefly, then sing that same note again.";
-            held = 0; return;
-        }
-        Guidance = "On pitch  -  hold it.";
-        held += seconds;
-        if (held < .15f) return;
-        if (Count == 0) tonic = candidate;
-        Count++; held = 0; separated = false;
-        Guidance = Count < Target && Notes[Count] == Notes[Count-1]
-            ? "Pause briefly, then sing that same note again." : "Sing the highlighted note.";
+        Progress = Mathf.Clamp01((time-start)/(end-start));
+        if (time < LeadIn) Guidance = "Get ready   " + Mathf.CeilToInt((LeadIn-time)/Beat);
+    }
+    public void Hear(float hz, float time) {
+        Advance(time);
+        float dt = Mathf.Clamp(time - Mathf.Max(lastHeard,start), 0, .04f);
+        lastHeard = time;
+        if (Count >= Target || time < start || Matched[Count]) return;
+        if (hz <= 0) { Guidance = "Sing the highlighted note"; return; }
+        float pitch = 12*Mathf.Log(hz/440f,2);
+        if (!keyed) { tonic = pitch - Notes[Count]; keyed = true; }
+        float error = pitch - tonic - Notes[Count];
+        if (Mathf.Abs(error) > 1f) { Guidance = error < 0 ? "Sing higher" : "Sing lower"; return; }
+        credit += dt;
+        Guidance = "On pitch";
+        if (credit >= .08f) { Matched[Count] = true; Hits++; Guidance = "Matched"; }
     }
 
     public static float Detect(float[] samples, int rate)

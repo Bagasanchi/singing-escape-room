@@ -18,7 +18,7 @@ public sealed class MusicRoom : MonoBehaviour
     AudioSource speaker;
     AudioClip mic;
     string device, message = "", prompt = "";
-    float messageUntil, nextSample, started, level;
+    float messageUntil, nextSample, started, performanceStart;
     int cluesFound, lastPosition;
     bool full, open, encore, escaped, preview;
     readonly MelodyStaff staff = new MelodyStaff();
@@ -69,8 +69,11 @@ public sealed class MusicRoom : MonoBehaviour
         if(preview)return;
         if(song!=null) {
             if(keys.escapeKey.wasPressedThisFrame) StopListening();
-            else if(keys.pKey.wasPressedThisFrame) StartCoroutine(Preview(true));
-            else Sample();
+            else {
+                song.Advance(Time.unscaledTime-performanceStart);
+                if(song.Count==song.Target) FinishPerformance();
+                else Sample();
+            }
             return;
         }
         if(Physics.Raycast(eye.transform.position,eye.transform.forward,out var hit,2.6f)) {
@@ -91,14 +94,14 @@ public sealed class MusicRoom : MonoBehaviour
             else if(keys.eKey.wasPressedThisFrame)Begin();
         }
     }
-    IEnumerator Preview(bool single=false)
+    IEnumerator Preview()
     {
         preview=true;
-        int count=single?1:(full?42:7), rate=22050, beat=single?rate*3/4:rate*2/5;
+        int count=full?42:7, rate=22050, beat=Mathf.RoundToInt(rate*SingingLock.Beat);
         var data=new float[(count+count/7)*beat]; int start=0;
         for(int n=0;n<count;n++) {
             int length=beat*(n%7==6?2:1);
-            float hz=single?song.TargetHz:261.63f*Mathf.Pow(2,SingingLock.Notes[n]/12f);
+            float hz=261.63f*Mathf.Pow(2,SingingLock.Notes[n]/12f);
             for(int i=0;i<length*.88f;i++) data[start+i]=.18f*Mathf.Sin(2*Mathf.PI*hz*i/rate)*Mathf.Min(1,i/100f)*Mathf.Exp(-3f*i/length);
             start+=length;
         }
@@ -106,11 +109,7 @@ public sealed class MusicRoom : MonoBehaviour
         speaker.clip=example; speaker.Play();
         while(speaker.isPlaying) { if(Keyboard.current.escapeKey.wasPressedThisFrame)speaker.Stop(); yield return null; }
         speaker.clip=null; Destroy(example);
-        if(single && song!=null) {
-            yield return new WaitForSecondsRealtime(.35f);
-            song?.Hear(0,.1f);
-            started=Time.unscaledTime;
-        }
+
         preview=false;
     }
     void Begin()
@@ -119,14 +118,14 @@ public sealed class MusicRoom : MonoBehaviour
             if(Microphone.devices.Length==0) { Say("No microphone found. Connect one and press E again."); return; }
             device=Microphone.devices[0]; mic=Microphone.Start(device,true,2,22050);
             if(!mic) { Say("Microphone unavailable. Check microphone access and retry."); return; }
-            mono=new float[Mathf.NextPowerOfTwo(mic.frequency/12)]; raw=new float[mono.Length*mic.channels];
-            staff.Reset(); song=new SingingLock(full); started=Time.unscaledTime; lastPosition=-1;
+            mono=new float[Mathf.NextPowerOfTwo(mic.frequency/32)]; raw=new float[mono.Length*mic.channels];
+            staff.Reset(); song=new SingingLock(full); performanceStart=started=Time.unscaledTime; lastPosition=-1;
         } catch(System.Exception) { StopListening(); Say("Microphone unavailable. Check input permissions and retry."); }
     }
     void Sample()
     {
         float now=Time.unscaledTime;
-        if(now<nextSample)return; nextSample=now+.04f;
+        if(now<nextSample)return; nextSample=now+.02f;
         int pos=Microphone.GetPosition(device);
         if(pos<=0 || pos==lastPosition) {
             if(now-started>3) { StopListening(); Say("No microphone signal. Check the input device and retry."); } return;
@@ -134,13 +133,19 @@ public sealed class MusicRoom : MonoBehaviour
         if(lastPosition<0 && pos<mono.Length)return;
         lastPosition=pos; started=now;
         if(!mic.GetData(raw,(pos-mono.Length+mic.samples)%mic.samples)) { StopListening(); Say("Could not read microphone. Try again."); return; }
-        float energy=0;
-        for(int i=0;i<mono.Length;i++) { mono[i]=raw[i*mic.channels]; energy+=mono[i]*mono[i]; }
-        level=Mathf.Sqrt(energy/mono.Length);
-        song.Hear(SingingLock.Detect(mono,mic.frequency),.04f);
-        if(song.Count==song.Target) { encore=full; open=true; StopListening(); Say(encore?"Golden Star earned. Walk through the doorway.":"Door unlocked. Walk through, or sing the full verse for a Golden Star."); }
+        for(int i=0;i<mono.Length;i++) mono[i]=raw[i*mic.channels];
+        song.Hear(SingingLock.Detect(mono,mic.frequency),now-performanceStart);
     }
-    void StopListening() { if(mic) { Microphone.End(device); Destroy(mic); } mic=null; song=null; level=0; }
+    void FinishPerformance() {
+        string score=song.Hits+" / "+song.Target+" notes";
+        bool passed=song.Hits>=song.Required;
+        int needed=song.Required;
+        StopListening();
+        if (!passed) { Say(score+". Match "+needed+" to pass. Press E at the door to retry."); return; }
+        open=true; encore=full;
+        Say(score+(encore?"   Golden Star earned!":"   Door unlocked!")+" Walk through the doorway.");
+    }
+    void StopListening() { if(mic) { Microphone.End(device); Destroy(mic); } mic=null; song=null; }
     void OnDisable() { StopListening(); }
     void OnGUI()
     {
@@ -151,7 +156,7 @@ public sealed class MusicRoom : MonoBehaviour
         GUI.Box(new Rect(14,14,310,64),"THE MUSIC ROOM    •    "+cluesFound+"/3 clues\n"+(open?"Exit through the singing door":cluesFound<3?"Find the three brass objects":"Approach the door   •   "+(full?"Full verse":"Opening phrase"))+"\nWASD   Walk      Mouse   Look");
         GUI.Label(new Rect(w/2-3,h/2-10,18,20),"+");
         if(song!=null) {
-            staff.Draw(w,h,song,preview);
+            staff.Draw(w,h,song);
             return;
         }
         string text=
